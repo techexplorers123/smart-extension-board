@@ -1,20 +1,19 @@
 #define THINGER_SERIAL_DEBUG
+#define THINGER_OTA_VERSION "1.0.0"
 #define EEPROM_SIZE 1
 #define CONFIG_FLAG_ADDR 0
 #define relay_pin D5
 #define BUTTON_PIN 0
 #include <EEPROM.h>
-#include <ThingerConsole.h>
 #include <ThingerESP8266WebConfig.h>
+#include <ThingerESP8266OTA.h>
 ThingerESP8266WebConfig thing;
-ThingerConsole console(thing);
+ThingerESP8266OTA ota(thing);
 unsigned long last_press_time = 0;
 unsigned long press_window = 3000;
 int press_count = 0;
 bool button_last_state = HIGH;
 bool in_config_portal = false;
-
-// Reset press count logic
 void startConfigPortal()
 {
   Serial.println(">> Starting Configuration Portal...");
