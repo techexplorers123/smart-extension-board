@@ -1,5 +1,5 @@
 #define THINGER_SERIAL_DEBUG
-#define THINGER_OTA_VERSION "1.0.0"
+#define THINGER_OTA_VERSION "1.0.2"
 #define EEPROM_SIZE 10
 #define CONFIG_FLAG_ADDR 0
 #define RESET_COUNTER_ADDR 1
@@ -11,11 +11,11 @@
 #include <ArduinoJson.h>
 ThingerESP8266WebConfig thing;
 ThingerESP8266OTA ota(thing);
-unsigned long press_window = 3000;
+unsigned long press_window = 1000;
 bool in_config_portal = false;
 char USERNAME[30];
-char ACCESS_TOKEN[200];
-char DEVICE[200];
+char password[64];
+char DEVICE[100];
 String getSanitizedMac()
 {
     String mac = WiFi.macAddress();
@@ -29,11 +29,10 @@ const char *MAC_replace()
     return sanitizedMac.c_str();
 }
 
-void provision_device(const char *host, uint16_t port, const char *username, const char *access_token, const char *device, const char *name, const char *device_credentials)
+void provision_device(const char *host, uint16_t port, const char *username, const char *passwd, const char *device, const char *name, const char *device_credentials)
 {
-    WiFiClientSecure httpsClient; // Declare object of class WiFiClient
+    WiFiClientSecure httpsClient;
     httpsClient.setInsecure();
-    Serial.println(host);
     httpsClient.setTimeout(15000); // 15 Seconds
     Serial.print("HTTPS Connecting");
     int r = 0; // retry counter
@@ -51,19 +50,54 @@ void provision_device(const char *host, uint16_t port, const char *username, con
     {
         Serial.println("Connected to web");
     }
-    String getData, Link;
-    StaticJsonDocument<200> doc;
+    String getData, Link, access_token;
+    String url = "/oauth/token";
+    String payload = "grant_type=password&username=" + String(username) + "&password=" + String(passwd);
+    int str_len = payload.length();
+    httpsClient.print(String("POST ") + url + " HTTP/1.1\r\n" + "Host: " + host + "\r\n" + "Content-Type: application/x-www-form-urlencoded" + "\r\n" + "Content-Length: " + String(str_len) + "\r\n" + "Connection: close\r\n\r\n" + payload);
+    String response = "";
+    while (httpsClient.connected() || httpsClient.available())
+    {
+        if (httpsClient.available())
+        {
+            response += httpsClient.readString();
+        }
+    }
+    Serial.println("Raw response:");
+    Serial.println(response);
+    int jsonStart = response.indexOf('{');
+    if (jsonStart == -1)
+    {
+        Serial.println("JSON body not found.");
+        return;
+    }
+    String jsonPart = response.substring(jsonStart);
+
+    StaticJsonDocument<1024> doc1;
+    DeserializationError error = deserializeJson(doc1, jsonPart);
+    if (error)
+    {
+        Serial.print("JSON Parse Failed: ");
+        Serial.println(error.c_str());
+        Serial.println(jsonPart);
+    }
+    else
+    {
+        access_token = doc1["access_token"].as<String>();
+        Serial.println("Access Token: " + access_token);
+    }
+    StaticJsonDocument<500> doc;
     JsonObject root = doc.to<JsonObject>();
     root["type"] = "Generic";
     root["device"] = device;
-    root["description"] = name;
+    root["name"] = name;
     root["credentials"] = device_credentials;
     char JSONmessageBuffer[200];
     size_t size = serializeJson(root, JSONmessageBuffer);
     String body((const char *)JSONmessageBuffer);
     Serial.print("USERNAME: ");
     Serial.println(USERNAME);
-    Link = "/v1/users/" + String(USERNAME) + "/devices?authorization=" + String(access_token);
+    Link = "/v1/users/" + String(USERNAME) + "/devices?authorization=" + access_token;
     Serial.print("requesting URL: ");
     Serial.println(Link);
     Serial.println(body);
@@ -83,6 +117,7 @@ void startConfigPortal()
     Serial.println(">> Starting Configuration Portal...");
     thing.clean_credentials();
     EEPROM.write(CONFIG_FLAG_ADDR, 1);
+    EEPROM.commit();
     delay(100);
     thing.reboot();
 }
@@ -91,26 +126,25 @@ void setup()
 {
     Serial.begin(115200);
     EEPROM.begin(EEPROM_SIZE);
-    thing.add_setup_parameter("AccessToken", "access token", "", 200);
+    thing.add_setup_parameter("password", "password", "", 200);
     thing.add_setup_parameter("name", "device name", "ESP device", 100);
     if (EEPROM.read(CONFIG_FLAG_ADDR) == 1)
     {
         Serial.println(">> Detected config flag! Starting config mode...");
-        EEPROM.write(CONFIG_FLAG_ADDR, 0);
-        EEPROM.commit();
         in_config_portal = true;
+        EEPROM.write(CONFIG_FLAG_ADDR, 0);
         EEPROM.write(RESET_COUNTER_ADDR, 0);
         EEPROM.write(first_run, 1);
         EEPROM.commit();
     }
-    if (EEPROM.read(first_run) == 1 && in_config_portal == false)
+    if (EEPROM.read(first_run) == 1)
     {
         thing.set_on_config_callback([](pson &config)
                                      {
-            strcpy(USERNAME, config["user"]);
-            strcpy(ACCESS_TOKEN, config["AccessToken"]);
+                                        strcpy(USERNAME, config["user"]);
+            strcpy(password, config["password"]);
             strcpy(DEVICE, config["name"]);
-            provision_device("api.thinger.io", 443, USERNAME, ACCESS_TOKEN, "smart_extension", DEVICE, MAC_replace()); });
+            provision_device("api.thinger.io", 443, USERNAME, password, "smart_extension", DEVICE, MAC_replace()); });
         EEPROM.write(first_run, 0);
         EEPROM.commit();
     }
@@ -123,7 +157,7 @@ void setup()
     }
     thing["switch"] << digitalPin(relay_pin);
     uint8_t resets = EEPROM.read(RESET_COUNTER_ADDR);
-    if (resets >= 3)
+    if (resets >= 2)
     {
         startConfigPortal();
     }
