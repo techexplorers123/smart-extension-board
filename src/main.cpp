@@ -29,7 +29,7 @@ const char *MAC_replace()
     return sanitizedMac.c_str();
 }
 
-void provision_device(const char *host, uint16_t port, const char *username, const char *access_token, const char *device, const char *device_credentials)
+void provision_device(const char *host, uint16_t port, const char *username, const char *access_token, const char *device, const char *name, const char *device_credentials)
 {
     WiFiClientSecure httpsClient; // Declare object of class WiFiClient
     httpsClient.setInsecure();
@@ -55,8 +55,8 @@ void provision_device(const char *host, uint16_t port, const char *username, con
     StaticJsonDocument<200> doc;
     JsonObject root = doc.to<JsonObject>();
     root["type"] = "Generic";
-    root["device"] = "smart_extension";
-    root["description"] = device;
+    root["device"] = device;
+    root["description"] = name;
     root["credentials"] = device_credentials;
     char JSONmessageBuffer[200];
     size_t size = serializeJson(root, JSONmessageBuffer);
@@ -83,8 +83,6 @@ void startConfigPortal()
     Serial.println(">> Starting Configuration Portal...");
     thing.clean_credentials();
     EEPROM.write(CONFIG_FLAG_ADDR, 1);
-    EEPROM.write(RESET_COUNTER_ADDR, 0);
-    EEPROM.commit();
     delay(100);
     thing.reboot();
 }
@@ -94,12 +92,16 @@ void setup()
     Serial.begin(115200);
     EEPROM.begin(EEPROM_SIZE);
     thing.add_setup_parameter("AccessToken", "access token", "", 200);
+    thing.add_setup_parameter("name", "device name", "ESP device", 100);
     if (EEPROM.read(CONFIG_FLAG_ADDR) == 1)
     {
         Serial.println(">> Detected config flag! Starting config mode...");
         EEPROM.write(CONFIG_FLAG_ADDR, 0);
         EEPROM.commit();
         in_config_portal = true;
+        EEPROM.write(RESET_COUNTER_ADDR, 0);
+        EEPROM.write(first_run, 1);
+        EEPROM.commit();
     }
     if (EEPROM.read(first_run) == 1 && in_config_portal == false)
     {
@@ -107,8 +109,8 @@ void setup()
                                      {
             strcpy(USERNAME, config["user"]);
             strcpy(ACCESS_TOKEN, config["AccessToken"]);
-            strcpy(DEVICE, config["Device"]);
-            provision_device("api.thinger.io", 443, USERNAME, ACCESS_TOKEN, DEVICE, MAC_replace()); });
+            strcpy(DEVICE, config["name"]);
+            provision_device("api.thinger.io", 443, USERNAME, ACCESS_TOKEN, "smart_extension", DEVICE, MAC_replace()); });
         EEPROM.write(first_run, 0);
         EEPROM.commit();
     }
@@ -130,6 +132,7 @@ void setup()
         EEPROM.write(RESET_COUNTER_ADDR, resets + 1);
         EEPROM.commit();
     }
+    thing.set_device("smart_extension");
     thing.set_credential(MAC_replace());
 }
 
