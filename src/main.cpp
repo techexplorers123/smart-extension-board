@@ -3,7 +3,6 @@
 #define EEPROM_SIZE 10
 #define CONFIG_FLAG_ADDR 0
 #define RESET_COUNTER_ADDR 1
-#define first_run 2
 #define relay_pin D5
 #include <EEPROM.h>
 #include <ThingerESP8266WebConfig.h>
@@ -16,100 +15,88 @@ bool in_config_portal = false;
 char USERNAME[30];
 char password[64];
 char DEVICE[100];
-String getSanitizedMac()
-{
-    String mac = WiFi.macAddress();
-    mac.replace(":", "");
-    return mac;
-}
 
-const char *MAC_replace()
-{
-    static String sanitizedMac = getSanitizedMac();
-    return sanitizedMac.c_str();
-}
-
-void provision_device(const char *host, uint16_t port, const char *username, const char *passwd, const char *device, const char *name, const char *device_credentials)
+void provision_device(const char *host, uint16_t port, const char *username, const char *passwd, const char *name, const char *device_credentials)
 {
     WiFiClientSecure httpsClient;
     httpsClient.setInsecure();
-    httpsClient.setTimeout(15000); // 15 Seconds
-    Serial.print("HTTPS Connecting");
-    int r = 0; // retry counter
-    while ((!httpsClient.connect(host, port)) && (r < 30))
-    {
-        delay(100);
-        Serial.print(".");
-        r++;
-    }
-    if (r == 30)
-    {
-        Serial.println("Connection failed");
-    }
-    else
-    {
-        Serial.println("Connected to web");
-    }
-    String getData, Link, access_token;
-    String url = "/oauth/token";
-    String payload = "grant_type=password&username=" + String(username) + "&password=" + String(passwd);
-    int str_len = payload.length();
-    httpsClient.print(String("POST ") + url + " HTTP/1.1\r\n" + "Host: " + host + "\r\n" + "Content-Type: application/x-www-form-urlencoded" + "\r\n" + "Content-Length: " + String(str_len) + "\r\n" + "Connection: close\r\n\r\n" + payload);
-    String response = "";
+    httpsClient.setTimeout(15000);
+    String authPayload = String("grant_type=password&username=") + username + "&password=" + passwd;
+    Serial.print("Connecting for token…");
+    httpsClient.connect(host, port);
+    httpsClient.printf(
+        "POST /oauth/token HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Content-Type: application/x-www-form-urlencoded\r\n"
+        "Content-Length: %u\r\n"
+        "Connection: close\r\n\r\n"
+        "%s",
+        host,
+        authPayload.length(),
+        authPayload.c_str());
+    String resp = "";
     while (httpsClient.connected() || httpsClient.available())
     {
         if (httpsClient.available())
         {
-            response += httpsClient.readString();
+            resp += httpsClient.readString();
         }
     }
-    Serial.println("Raw response:");
-    Serial.println(response);
-    int jsonStart = response.indexOf('{');
-    if (jsonStart == -1)
+    httpsClient.stop();
+    int idx = resp.indexOf("{");
+    if (idx < 0)
     {
-        Serial.println("JSON body not found.");
+        Serial.println("No HTTP body in token response");
         return;
     }
-    String jsonPart = response.substring(jsonStart);
-
-    StaticJsonDocument<1024> doc1;
-    DeserializationError error = deserializeJson(doc1, jsonPart);
-    if (error)
+    String body = resp.substring(idx);
+    StaticJsonDocument<512> json;
+    auto err = deserializeJson(json, body);
+    if (err)
     {
-        Serial.print("JSON Parse Failed: ");
-        Serial.println(error.c_str());
-        Serial.println(jsonPart);
+        Serial.print("Token JSON parse error: ");
+        Serial.println(err.c_str());
+        Serial.println(body);
+        return;
     }
-    else
+    String access_token = json["access_token"].as<String>();
+    Serial.println("Got access token: " + access_token);
+    StaticJsonDocument<256> doc;
+    doc["type"] = "Generic";
+    doc["device"] = "smart_extension";
+    doc["name"] = name;
+    doc["credentials"] = device_credentials;
+    String deviceBody;
+    serializeJson(doc, deviceBody);
+    WiFiClientSecure postClient;
+    postClient.setInsecure();
+    postClient.setTimeout(15000);
+    Serial.print("Connecting to create device…");
+    postClient.connect(host, port);
+    postClient.printf(
+        "POST /v1/users/%s/devices HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Authorization: Bearer %s\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %u\r\n"
+        "Connection: close\r\n\r\n"
+        "%s",
+        username,
+        host,
+        access_token.c_str(),
+        deviceBody.length(),
+        deviceBody.c_str());
+    String resp2 = "";
+    while (postClient.connected() || postClient.available())
     {
-        access_token = doc1["access_token"].as<String>();
-        Serial.println("Access Token: " + access_token);
-    }
-    StaticJsonDocument<500> doc;
-    JsonObject root = doc.to<JsonObject>();
-    root["type"] = "Generic";
-    root["device"] = device;
-    root["name"] = name;
-    root["credentials"] = device_credentials;
-    char JSONmessageBuffer[200];
-    size_t size = serializeJson(root, JSONmessageBuffer);
-    String body((const char *)JSONmessageBuffer);
-    Serial.print("USERNAME: ");
-    Serial.println(USERNAME);
-    Link = "/v1/users/" + String(USERNAME) + "/devices?authorization=" + access_token;
-    Serial.print("requesting URL: ");
-    Serial.println(Link);
-    Serial.println(body);
-    httpsClient.print(String("POST ") + Link + " HTTP/1.1\r\n" + "Host: " + host + "\r\n" + "Content-Type: application/json" + "\r\n" + "Content-Length: " + String(size) + "\r\n" + "Connection: close\r\n\r\n" + body);
-    while (httpsClient.connected())
-    {
-        if (httpsClient.available())
+        if (postClient.available())
         {
-            char str = httpsClient.read();
-            Serial.print(str);
+            resp2 += char(postClient.read());
         }
     }
+    postClient.stop();
+    Serial.println("Device creation response:");
+    Serial.println(resp2);
 }
 
 void startConfigPortal()
@@ -134,22 +121,10 @@ void setup()
         in_config_portal = true;
         EEPROM.write(CONFIG_FLAG_ADDR, 0);
         EEPROM.write(RESET_COUNTER_ADDR, 0);
-        EEPROM.write(first_run, 1);
-        EEPROM.commit();
-    }
-    if (EEPROM.read(first_run) == 1)
-    {
-        thing.set_on_config_callback([](pson &config)
-                                     {
-                                        strcpy(USERNAME, config["user"]);
-            strcpy(password, config["password"]);
-            strcpy(DEVICE, config["name"]);
-            provision_device("api.thinger.io", 443, USERNAME, password, "smart_extension", DEVICE, MAC_replace()); });
-        EEPROM.write(first_run, 0);
         EEPROM.commit();
     }
     pinMode(LED_BUILTIN, OUTPUT);
-    digitalWrite(LED_BUILTIN, HIGH); // LED off initially
+    digitalWrite(LED_BUILTIN, HIGH);
     pinMode(relay_pin, OUTPUT);
     if (WiFi.status() == WL_CONNECTED)
     {
@@ -157,7 +132,7 @@ void setup()
     }
     thing["switch"] << digitalPin(relay_pin);
     uint8_t resets = EEPROM.read(RESET_COUNTER_ADDR);
-    if (resets >= 2)
+    if (resets > 2)
     {
         startConfigPortal();
     }
@@ -167,7 +142,22 @@ void setup()
         EEPROM.commit();
     }
     thing.set_device("smart_extension");
-    thing.set_credential(MAC_replace());
+    thing.set_credential("smart_extension123");
+    WiFi.mode(WIFI_STA);
+    WiFi.begin();
+    Serial.print("Joining WiFi");
+    uint8_t retries = 0;
+    while (WiFi.status() != WL_CONNECTED && retries++ < 20)
+    {
+        Serial.print(".");
+    }
+    Serial.println(" OK");
+    thing.set_on_config_callback([](pson &config)
+                                 {
+strcpy(USERNAME, config["user"]);
+strcpy(password, config["password"]);
+strcpy(DEVICE, config["name"]);
+provision_device("api.thinger.io", 443, USERNAME, password, DEVICE, "smart_extension123"); });
 }
 
 void loop()
